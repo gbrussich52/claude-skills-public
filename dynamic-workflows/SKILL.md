@@ -1,16 +1,8 @@
 ---
 name: dynamic-workflows
 description: Use when asked to "use a dynamic workflow", "build a workflow for this", "orchestrate sub-agents", "fan-out and synthesize", "run adversarial verification", "run a tournament", "create a harness for this" — or when a task is parallel, verification-heavy, or long-running: due diligence, idea evaluation, market/risk analysis, large refactors, deep verification, synthesizing large amounts of information. Decides when/how to use Claude Code dynamic workflows and crafts, ships, and runs them. Always save useful workflows for reuse.
-when-to-use: |
-  - Complex research with multiple angles (market, financials, legal, ops, risks)
-  - Evaluating ideas or targets needing thorough, unbiased analysis
-  - Tasks prone to agentic laziness, self-preferential bias, or goal drift in a single context
-  - Parallel exploration: multiple hypotheses, screening at scale, idea tournaments, root-cause analysis
-  - Verification-heavy work: fact-checking claims, adversarial review, compliance checks
-  - Large refactors/migrations with many callsites (fan-out per change + adversarial review)
-  - Mining past sessions/incidents/data for patterns and turning them into rules
-allowed-tools: all
-argument-hint: "Research this business idea with a dynamic workflow — fan-out for market/financials/ops/risks + adversarial verification. Save the workflow."
+license: MIT
+compatibility: Requires Claude Code with the Workflow tool (dynamic workflows)
 ---
 
 # Dynamic Workflows in Claude Code
@@ -23,6 +15,16 @@ They exist to combat three failure modes of long single contexts:
 - **Goal drift** — especially after compaction
 
 Sub-agents each get a **clean context window and a focused goal**, which is what makes the orchestration worth its token cost.
+
+## When to Use
+
+- Complex research with multiple angles (market, financials, legal, ops, risks)
+- Evaluating ideas or targets needing thorough, unbiased analysis
+- Tasks prone to agentic laziness, self-preferential bias, or goal drift in a single context
+- Parallel exploration: multiple hypotheses, screening at scale, idea tournaments, root-cause analysis
+- Verification-heavy work: fact-checking claims, adversarial review, compliance checks
+- Large refactors/migrations with many callsites (fan-out per change + adversarial review)
+- Mining past sessions/incidents/data for patterns and turning them into rules
 
 ## How to Trigger
 
