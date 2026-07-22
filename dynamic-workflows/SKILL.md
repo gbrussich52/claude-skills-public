@@ -88,7 +88,7 @@ At 50+ agent() calls, expect a nonzero rate of transient failures — API connec
 
 ## Token & Cost Discipline (non-negotiable)
 
-- Set an explicit budget in every workflow prompt ("use max 12k–20k tokens").
+- Set an explicit budget in every workflow prompt, sized to the tier of work: a single adversarial-verification step ~10–30k tokens; a modest fan-out (3–6 agents, one round) ~50–150k; a full multi-dimension research harness with adversarial verify commonly runs 500k–1M. Calibrate against measured runs, not wishful numbers.
 - Prefer a quick adversarial step over full orchestration when the failure modes aren't clearly present.
 - Sub-agents are powerful *because* they get clean contexts — but that power costs tokens. Spend it only where it buys real risk reduction.
 

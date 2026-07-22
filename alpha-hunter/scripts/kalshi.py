@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -28,16 +29,21 @@ BASE = "https://api.elections.kalshi.com/trade-api/v2"
 UA = "alpha-hunter/1.0"
 
 
-def _get(path: str, params: dict | None = None) -> dict:
+def _get(path: str, params: dict | None = None, retries: int = 3) -> dict:
     url = f"{BASE}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            return json.loads(r.read().decode())
-    except Exception as e:  # noqa: BLE001 - surface any network/HTTP failure loudly
-        raise SystemExit(f"ERROR: Kalshi request failed ({path}): {e}")
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return json.loads(r.read().decode())
+        except Exception as e:  # noqa: BLE001 - IncompleteRead is common on large responses; retry
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+    raise SystemExit(f"ERROR: Kalshi request failed after {retries} tries ({path}): {last_err}")
 
 
 def _f(v) -> float | None:

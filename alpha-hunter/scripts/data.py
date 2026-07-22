@@ -2,9 +2,11 @@
 """Shared daily-OHLC fetcher for Alpha Hunter. Free sources, $0.
 
 Reliability strategy (the free-data landscape is hostile in 2026):
-  1. Yahoo Finance chart API — keyless. Rotates query1<->query2 and retries with
+  1. Schwab Trader API — primary once configured (`python3 schwab.py login`);
+     real quotes and OHLC history from the brokerage feed.
+  2. Yahoo Finance chart API — keyless. Rotates query1<->query2 and retries with
      backoff on 429/5xx. Fine for light, single-ticker use.
-  2. Tiingo fallback — if env var TIINGO_KEY is set (free tier, generous limits,
+  3. Tiingo fallback — if env var TIINGO_KEY is set (free tier, generous limits,
      2-min signup at tiingo.com). Reliable when Yahoo throttles.
 
 Fails LOUDLY (SystemExit) if every source fails. Never returns fabricated data.

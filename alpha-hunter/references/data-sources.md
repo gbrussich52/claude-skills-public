@@ -52,6 +52,6 @@ The scripts fail **loudly** on network errors — they never silently return fak
 
 ## Freshness discipline
 
-- Stooq daily bars are **end-of-day**; they lag intraday. Label as such.
+- Free daily bars (Yahoo/Tiingo) are **end-of-day**; they lag intraday. Label as such.
 - After hours / pre-market: options spreads are wide and quotes thin. State it and
   recommend re-confirming during regular hours before execution.

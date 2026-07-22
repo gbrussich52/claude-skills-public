@@ -44,7 +44,7 @@ def build_context(ticker: str, rows: list[dict]) -> dict:
     s20, s50, s200 = sma(closes, 20), sma(closes, 50), sma(closes, 200)
     return {
         "ticker": ticker.upper(),
-        "stooq_symbol": normalize_symbol(ticker),
+        "provider_symbol": normalize_symbol(ticker),
         "as_of_bar_date": last["date"],
         "fetched_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "data_freshness": "END-OF-DAY daily bars (may lag intraday). Re-confirm live before execution.",
@@ -71,7 +71,7 @@ def main(argv: list[str]) -> int:
     if as_json:
         print(json.dumps(ctx, indent=2))
         return 0
-    print(f"=== {ctx['ticker']} ({ctx['stooq_symbol']}) ===")
+    print(f"=== {ctx['ticker']} ({ctx['provider_symbol']}) ===")
     print(f"As-of bar: {ctx['as_of_bar_date']}   Fetched: {ctx['fetched_utc']}")
     print(f"! {ctx['data_freshness']}")
     o = ctx["last_ohlc"]

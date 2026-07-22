@@ -50,10 +50,12 @@ The skill will return:
 
 ## Real Data & Backtested Base Rates
 
-This skill does not quote prices or win rates from memory. It ships two scripts (`scripts/`):
+This skill does not quote prices or win rates from memory. It ships a script toolkit (`scripts/`):
 
 - **`fetch_data.py TICKER`** — pulls real recent levels (last OHLC, 20/50/200 SMAs, 20-day high/low) with a timestamp.
 - **`backtest.py TICKER`** — computes *measured* historical base rates (gap-fill, breakout follow-through, oversold bounce), each with sample size and a 95% Wilson confidence interval. A rate with a small `n` or wide CI is flagged **not tradable** — no false precision.
+- **`kalshi.py`** — live prediction-market implied probabilities (keyless, read-only; `search` / `series` / `market` commands).
+- **`data.py`** — the shared fetch waterfall both scripts use (Schwab → Yahoo → Tiingo); **`schwab.py`** — brokerage data + the only real option Greeks (below).
 
 Every number the skill states carries a provenance tag: `[LIVE]`, `[BACKTEST n=… CI95=…]`, `[BASE RATE: source]`, or `[ESTIMATE]`. It never dresses an estimate up as a backtest.
 

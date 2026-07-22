@@ -27,8 +27,8 @@ Forge skills that serve Grok, Claude Code, Codex-style agents, and Pi/OpenClaw h
 A portable skill follows this structure:
 
 - **Grok-native**: Matches the standard `SKILL.md` + optional `scripts/`, `references/`, `assets/`.
-- **Claude-compatible**: Can live as `skills/<name>.md` or be referenced in `CLAUDE.md`. Supports MCP for artifacts.
-- **Codex / Autonomous ready**: Lives in `./skills/`. Invoked via natural language or `/goal`.
+- **Claude-compatible**: Lives as a `skills/<name>/SKILL.md` directory (the folder name must match `name:`) or is referenced in `CLAUDE.md`. Supports MCP for artifacts.
+- **Codex / Autonomous ready**: Lives in `.codex/skills/` (Codex CLI). Invoked via natural language or `/goal`.
 - **Pi / OpenClaw compatible**: Focused `.md` files with clean extension points. The harness can load and evolve them.
 
 ### Recommended Layout
@@ -50,7 +50,7 @@ my-skill/
 ```yaml
 ---
 name: kebab-case-name
-description: Single-line trigger description. What + WHEN. Max ~1024 chars. No colons in value.
+description: Single-line trigger description. What + WHEN. Max ~1024 chars.
 license: MIT
 compatibility: Designed for Grok, Claude Code, Codex-style agents, and Pi/OpenClaw harnesses
 metadata:
@@ -61,7 +61,7 @@ metadata:
 ---
 ```
 
-Extended keys (`mcp_connectors`, `depends_on`, `provides`) are encouraged — **nest them under `metadata:`** so the frontmatter stays valid against the Agent Skills spec (agentskills.io): the only recognized top-level fields are `name`, `description`, `license`, `compatibility` (a string, max 500 chars — not a list), `metadata`, and `allowed-tools`.
+Extended keys (`mcp_connectors`, `depends_on`, `provides`) are encouraged — **nest them under `metadata:`** so the frontmatter stays valid against the Agent Skills spec (agentskills.io): the only recognized top-level fields are `name`, `description`, `license`, `compatibility` (a string, max 500 chars — not a list), `metadata` (string→string map, no list values), and `allowed-tools`.
 
 > Note for Claude Code: only `name` and `description` drive skill loading. But claude.ai's skill upload **validates frontmatter strictly against the spec** — unknown top-level keys, or a list-valued `compatibility`, fail validation. Keep custom keys under `metadata:` and they travel everywhere safely.
 
@@ -135,9 +135,9 @@ Use this as a lens, not a rigid template.
 
 ## Invocation Patterns
 
-- **Grok**: `load_skill agent-skill-forge` then describe the desired skill.
-- **Claude Code**: Reference in `CLAUDE.md` or drop as `skills/my-skill.md`. Include MCP declarations for artifacts.
-- **Codex-style agents**: Place in `./skills/my-skill.md`. Use natural language or `/goal`.
+- **Grok**: installed skills auto-load at session start — just describe the desired skill.
+- **Claude Code**: Reference in `CLAUDE.md` or drop as a `skills/my-skill/SKILL.md` directory. Include MCP declarations for artifacts.
+- **Codex-style agents**: Place in `.codex/skills/my-skill/`. Use natural language or `/goal`.
 - **Pi / OpenClaw**: Keep focused with clear extension points.
 - **Universal**: Skills can compose. A top-level skill can generate supporting docs (`AGENTS.md`, `CLAUDE.md`, etc.).
 
