@@ -83,11 +83,16 @@ programmatically, or revert them. "Set the fields read-only" is not flattening.
 ## Scanned forms
 
 `ocr` runs the cheapest rung that works, escalating only when it must. On macOS
-that starts with Apple's Vision engine: free, offline, no model download, and
-better than Tesseract on real scans. Read `references/ocr-ladder.md` before
-reaching for a vision model — and note that OCR gives you *text*, never *meaning*.
-For "is this box ticked" or "which option did they choose", a vision model is
-the right tool and the local engines are not.
+that starts with Apple's Vision engine — free, offline, no model download, and
+measurably better than Tesseract (0 OCR artifacts vs 3 on a real scan; see
+`references/ocr-ladder.md` for the numbers and the plugin install, which is not
+the one in the plugin's README).
+
+Confirm the OCR worked by the **lane flip**: a file that still triages as
+`scanned` afterwards got no text layer, whatever the tool reported.
+
+OCR gives you *text*, never *meaning*. For "is this box ticked" or "which option
+did they choose", a vision model is the right tool and no local engine is.
 
 ## Printed forms with no fields
 

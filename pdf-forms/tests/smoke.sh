@@ -130,6 +130,18 @@ expect_ok "[REGRESSION] flatten preserves pre-existing values (nothing_lost)" \
 # data remains extractable by anyone who receives it.
 expect_error "flattened file exposes no fillable fields" run fields "$WORK/flat.pdf"
 
+# qpdf alone leaves widget shells behind (its --remove-acroform only touches the
+# catalog entry), so the qpdf path must sweep them. Verified as strictly as the
+# built-in path, or the flag would quietly produce a weaker guarantee.
+if command -v qpdf >/dev/null 2>&1; then
+  run fill "$FORM" --data "$WORK/data.json" -o "$WORK/pre-q.pdf" >/dev/null 2>&1
+  expect_ok "flatten --qpdf runs" run flatten "$WORK/pre-q.pdf" -o "$WORK/q.pdf" --qpdf
+  expect_ok "[REGRESSION] qpdf output is fully flat (no leftover widgets)" \
+    run verify "$WORK/q.pdf" --expect "$WORK/data.json" --original "$FORM" --flat
+else
+  printf '  \033[33mSKIP\033[0m qpdf engine cases (qpdf not installed)\n'
+fi
+
 if python3 - "$WORK/flat.pdf" <<'PY'
 import subprocess,sys
 t=subprocess.run(["pdftotext","-q",sys.argv[1],"-"],capture_output=True,text=True).stdout
@@ -137,6 +149,32 @@ assert "Muñoz-Ünicode" in t, "expected ñ/Ü to survive; got substitution or l
 PY
 then ok "unicode survives flattening (no '?' substitution)"
 else bad "unicode mangled by flatten"; fi
+
+echo "== OCR =="
+# Builds its own scanned specimen so the case needs no private fixture: render a
+# page to an image, wrap the image back into a PDF, and that PDF has no text
+# layer at all. The assertion that matters is the lane FLIP — a lane that stays
+# `scanned` after OCR means the OCR did nothing, whatever it reported.
+if command -v ocrmypdf >/dev/null 2>&1; then
+  if pdftoppm -q -r 150 -png -f 1 -l 1 "$FORM" "$WORK/pg" \
+     && uv run --quiet --with img2pdf img2pdf -o "$WORK/scanlike.pdf" "$WORK"/pg-*.png 2>/dev/null; then
+    BEFORE=$(run triage "$WORK/scanlike.pdf" | python3 -c 'import json,sys;print(json.load(sys.stdin)["lane"])')
+    if [[ "$BEFORE" == "scanned" ]]; then ok "image-only PDF classified as scanned"
+    else bad "image-only PDF classified as scanned" "got $BEFORE"; fi
+
+    if run ocr "$WORK/scanlike.pdf" -o "$WORK/ocred.pdf" >/dev/null 2>&1; then
+      AFTER=$(run triage "$WORK/ocred.pdf" | python3 -c 'import json,sys;print(json.load(sys.stdin)["lane"])')
+      if [[ "$AFTER" != "scanned" ]]; then ok "OCR adds a text layer (lane $BEFORE -> $AFTER)"
+      else bad "OCR adds a text layer" "still classified scanned — OCR reported success but did nothing"; fi
+    else
+      bad "ocr runs" "see ocrmypdf output"
+    fi
+  else
+    printf '  \033[33mSKIP\033[0m OCR cases (could not build a scanned specimen)\n'
+  fi
+else
+  printf '  \033[33mSKIP\033[0m OCR cases (ocrmypdf not installed)\n'
+fi
 
 echo "== hybrid XFA (live IRS W-9) =="
 # The W-9 is an XFA/AcroForm hybrid. It must NOT be refused: its AcroForm layer

@@ -65,6 +65,18 @@ document you just sent to a third party.
 widget annotations remain. `fields OUT` on a properly flattened file must error
 with "no AcroForm fields".
 
+**qpdf alone does not finish the job.** Measured on the IRS W-9:
+`qpdf --flatten-annotations=all --remove-acroform` painted the appearances and
+cleared the values, but left **14 widget annotations** in place. Its manual says
+so outright — `--remove-acroform` "only removes the interactive form dictionary
+from the document catalog. It does not remove form field dictionaries or widget
+annotations." Empty widget shells still render as interactive boxes in some
+viewers, and `verify --flat` correctly rejects the result.
+
+`flatten --qpdf` therefore runs a widget sweep afterwards. With it, both engines
+produce byte-for-byte equivalent guarantees and **0.000% pixel difference** from
+each other. The built-in path is the default because it needs nothing installed.
+
 ---
 
 <a id="flatten-destroys"></a>

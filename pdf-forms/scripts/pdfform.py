@@ -800,10 +800,8 @@ def cmd_flatten(args) -> int:
     preserved = len(_existing_values(walk_fields(reader)))
 
     if args.qpdf and have("qpdf"):
-        cmd = ["qpdf", str(src), "--flatten-annotations=all"]
-        if args.remove_acroform:
-            cmd.append("--remove-acroform")
-        cmd.append(str(dest))
+        cmd = ["qpdf", str(src), "--flatten-annotations=all", "--remove-acroform",
+               str(dest)]
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if res.returncode not in (0, 3):  # 3 == warnings only
             note(f"qpdf failed ({res.returncode}): {res.stderr.strip()[:400]}")
@@ -811,7 +809,19 @@ def cmd_flatten(args) -> int:
             _do_fill(src, {}, dest, flatten=True)
             engine = "builtin (qpdf failed)"
         else:
-            engine = "qpdf"
+            # qpdf paints the appearances and clears the values, but leaves the
+            # widget annotations themselves in place — its manual is explicit
+            # that --remove-acroform "does not remove form field dictionaries or
+            # widget annotations". Empty widget shells still render as
+            # interactive boxes in some viewers, so strip them here and give
+            # both engines the same guarantee: no /AcroForm, no widgets.
+            leftover = PdfWriter(clone_from=str(dest))
+            leftover.remove_annotations(subtypes="/Widget")
+            if "/AcroForm" in leftover._root_object:
+                del leftover._root_object["/AcroForm"]
+            with open(dest, "wb") as fh:
+                leftover.write(fh)
+            engine = "qpdf + widget sweep"
     else:
         if args.qpdf:
             note("qpdf not installed — using the built-in appearance merge")
@@ -1173,10 +1183,9 @@ def main() -> int:
     p = sub.add_parser("flatten", help="burn values in and remove the form layer")
     p.add_argument("file")
     p.add_argument("-o", "--output", required=True)
-    p.add_argument("--remove-acroform", action="store_true",
-                   help="qpdf only: also drop /AcroForm — fixes doubled/offset text")
     p.add_argument("--qpdf", action="store_true",
-                   help="delegate to qpdf instead of the built-in appearance merge")
+                   help="delegate to qpdf instead of the built-in appearance merge "
+                        "(then sweep the widget shells qpdf leaves behind)")
     p.set_defaults(func=cmd_flatten)
 
     p = sub.add_parser("verify", help="prove the output is filled and truly flattened")

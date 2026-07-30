@@ -20,18 +20,74 @@ threshold used by `triage` is 100 chars/page — a convention, not a spec.
 **Stop here** if there is already good text. **Escalate** if fonts are 0, or
 chars/page is below the threshold, or the pages are a mix.
 
+The heuristic is verified in both directions — the same file before and after
+`ocr`:
+
+| | fonts | chars/page | `triage` lane |
+|---|---|---|---|
+| before | 0 | 0.0 | `scanned` |
+| after | 2 | 1295.0 | `flat` |
+
+A lane that does not change after OCR means the OCR did nothing, whatever it
+reported on the way out.
+
 ## Rung 1 — Apple Vision (macOS default)
 
-Free, offline, no model download, and better than Tesseract on real scans.
+Free, offline, no model download, and **measurably** better than Tesseract on
+real scans.
 
 ```bash
-brew install ocrmypdf
-pip install ocrmypdf-appleocr
+brew install ocrmypdf          # also brings tesseract, ghostscript, qpdf, unpaper
 ocrmypdf --ocr-engine appleocr --skip-text scan.pdf out.pdf
 ```
 
+**Installing the plugin — the non-obvious part.** Homebrew builds ocrmypdf's
+virtualenv with `--without-pip`, so there is no `pip` inside it and the README's
+`pip install ocrmypdf-appleocr` has nothing to run. Inject it into that
+interpreter instead:
+
+```bash
+V=$(brew --prefix ocrmypdf)/libexec
+uv pip install --python "$V/bin/python" ocrmypdf-appleocr
+ocrmypdf --help | grep 'ocr-engine {'   # confirm: {auto,tesseract,none,appleocr}
+```
+
+`appleocr` does not appear in `--ocr-engine`'s choices until the plugin
+registers itself, which makes this easy to verify and easy to miss. Note a
+`brew upgrade ocrmypdf` replaces the Cellar directory and drops the plugin —
+re-run the two commands above.
+
 Requires ocrmypdf ≥ 17 for `--ocr-engine`. Known limitation: multi-language
 (`-l eng+fra`) is not supported in the default livetext mode.
+
+### Measured, not assumed
+
+Verified 2026-07-29 on a real 3-page scanned business letter (0 fonts, 3
+extractable characters before OCR) with ocrmypdf 17.8.1 and tesseract 5.5.3 on
+Apple Silicon:
+
+| | Apple Vision | Tesseract |
+|---|---|---|
+| Wall clock, 3 pages | 4s | 2s |
+| Characters recovered | 2,148 | 2,168 |
+| **OCR artifacts** | **0** | **3** |
+
+All three Tesseract errors were in the first 500 characters, and all three are
+its classic failure shapes:
+
+| Shape | Example |
+|---|---|
+| stray punctuation inside a number | `NY 12553` → `NY .12553` |
+| `ll` read as `li` | a place name silently altered |
+| `I` read as `\|` | `I am writing` → `\| am writing` |
+
+Apple Vision got all three right. Note that similar character *volume* is not
+similar *accuracy* — the counts differ by 1% while one output is clean and the
+other has three errors, so **never use character count as a quality signal.**
+The `ll`→`li` class is the dangerous one: it produces a real-looking word that
+no spellcheck or heuristic will flag.
+
+Tesseract is faster on small jobs. Accuracy wins.
 
 Zero-install alternative, a prebuilt Swift binary using the same engine:
 
