@@ -27,11 +27,29 @@ command here is built to make those failures loud.
 ## Start here, always
 
 ```bash
-uv run --script scripts/pdfform.py triage FILE.pdf
+pdfform auto FILE.pdf
 ```
 
-It classifies the file and prints the exact next command. Do not skip it: the
-right approach differs completely per lane, and guessing wastes a cycle.
+One call does the routing: it classifies the file, **OCRs it automatically if it
+turns out to be a scan**, then reports every fillable field with a human-readable
+label and writes a `.fill.json` template pre-populated from the saved profile.
+
+Then fill it in one more call:
+
+```bash
+pdfform complete FILE.pdf --data FILE.fill.json -o out.pdf
+```
+
+`complete` resolves → validates → fills → flattens → verifies, and exits
+non-zero if any check fails. Two commands, start to finished document.
+
+`pdfform` is on the PATH (symlinked from `scripts/pdfform`). Everything also
+works as `uv run --script scripts/pdfform.py ...` if it isn't.
+
+The individual steps below still exist — `triage`, `fields`, `fill`, `flatten`,
+`verify` — and are worth reaching for when something goes wrong or you want to
+inspect before writing. `auto` and `complete` are the same code paths wired
+together, not a separate shortcut with weaker checks.
 
 | Lane | Means | Do |
 |---|---|---|
@@ -49,6 +67,36 @@ uv run --script scripts/pdfform.py fields FILE.pdf --json --mask   # discover
 uv run --script scripts/pdfform.py fill  FILE.pdf --data d.json -o out.pdf --flatten
 uv run --script scripts/pdfform.py verify out.pdf --expect d.json --original FILE.pdf --flat
 ```
+
+### Naming fields the human way
+
+You can key your data by the real field name **or by what the field is called on
+the page**. `"Individual/sole proprietor": true` resolves to
+`topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].c1_1[0]` on the IRS W-9.
+
+Labels come from the form's `/TU` tooltip where it exists, and are otherwise
+**read off the page** by position — text to the left of a box, or to the right
+of a checkbox. Most forms (the W-9 included) carry no tooltips at all, so
+inference is the normal case, and it is approximate by nature. Two consequences:
+
+- The exact `name` is always authoritative. `auto` prints both; prefer the name
+  when writing a file you will reuse.
+- A label that matches two fields is **reported, never guessed**. "Name of
+  entity/individual" matches both line 1 and line 2 of a W-9; silently picking
+  one would put a legal name in the business-name box.
+
+### Saved profile
+
+`pdfform profile set "first name=Jordan" "city=Rye"` stores values you retype on
+every form; `auto` and `complete` apply them automatically. Profile keys that
+don't exist on a given form are skipped silently — only keys you pass explicitly
+in `--data` are held to a strict match.
+
+It **refuses** SSN, DOB, licence, passport, account, card, and routing-style
+keys. It is a plaintext file at `~/.config/pdf-forms/profile.json` (mode 600),
+and those values belong in `--data` per form, typed deliberately.
+
+### Reading the field list
 
 Read `fields` output before writing `d.json`. It gives the **fully-qualified**
 field name and, for every checkbox and radio, its **legal on-states**. Those are

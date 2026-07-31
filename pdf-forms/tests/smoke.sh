@@ -150,6 +150,59 @@ PY
 then ok "unicode survives flattening (no '?' substitution)"
 else bad "unicode mangled by flatten"; fi
 
+echo "== profile (must refuse secrets) =="
+# The profile is a plaintext file. The refusal list is the only thing standing
+# between convenience and an SSN on disk, so it is tested adversarially. An
+# earlier regex version matched none of these: `\b...driver.?s?.?lic\b` cannot
+# match "drivers license" because the trailing \b falls between "lic" and "e".
+export PDFFORM_PROFILE_HOME="$WORK"   # keep the real profile untouched
+if python3 - "$PDFFORM" <<'PY'
+import subprocess, sys, json, os, pathlib, tempfile
+script = sys.argv[1]
+home = pathlib.Path(tempfile.mkdtemp())
+env = {**os.environ, "HOME": str(home)}
+secrets = ["SSN=1","ssn#=1","Social Security Number=1","DOB=1","Date of Birth=1",
+           "birthdate=1","drivers license=1","Driver's License #=1","DL=1",
+           "license number=1","passport=1","Account Number=1","routing=1",
+           "credit card=1","CVV=1","PIN=1","mother's maiden name=1","Tax ID=1","EIN=1"]
+benign  = ["first name=Jordan","city=Anytown","printing=ok","tint=ok"]
+r = subprocess.run(["uv","run","--script",script,"profile","set",*secrets,*benign],
+                   capture_output=True, text=True, env=env)
+out = json.loads(r.stdout)
+refused, stored = set(out.get("refused",[])), set(out.get("stored",[]))
+missed = [s.split("=")[0] for s in secrets if s.split("=")[0] not in refused]
+assert not missed, f"SECRETS ACCEPTED: {missed}"
+# False positives matter too: "printing" contains "pin", "tint" contains "tin".
+assert {"printing","tint","first name","city"} <= stored, f"benign keys rejected: {stored}"
+prof = home/".config"/"pdf-forms"/"profile.json"
+body = prof.read_text() if prof.exists() else ""
+assert "1" not in json.loads(body or "{}").values(), "a refused value reached disk"
+PY
+then ok "[REGRESSION] profile refuses every secret, keeps benign lookalikes"
+else bad "[REGRESSION] profile refuses every secret"; fi
+unset PDFFORM_PROFILE_HOME
+
+echo "== auto / complete (the frictionless path) =="
+expect_ok "auto routes and writes a fill template" \
+  run auto "$FORM" --template "$WORK/auto.json" --no-profile
+if [[ -s "$WORK/auto.json" ]]; then ok "auto template is non-empty"
+else bad "auto template is non-empty"; fi
+
+# Human labels must resolve to real fields, or the whole point is lost.
+if LBL=$(run auto "$FORM" --template "$WORK/a2.json" --no-profile \
+         | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+c=[f for f in (d.get("labels") or []) if f.get("label") and f["type"]=="text"]
+print(c[0]["label"] if c else "")'); [[ -n "$LBL" ]]; then
+  python3 -c "import json,sys;json.dump({sys.argv[2]:'LabelResolved'},open(sys.argv[1],'w'))" \
+    "$WORK/bylabel.json" "$LBL"
+  expect_ok "complete accepts a human label instead of a field name" \
+    run complete "$FORM" --data "$WORK/bylabel.json" -o "$WORK/bylabel.pdf" --no-profile
+else
+  printf '  \033[33mSKIP\033[0m label resolution (no labelled text field on this form)\n'
+fi
+
 echo "== OCR =="
 # Builds its own scanned specimen so the case needs no private fixture: render a
 # page to an image, wrap the image back into a PDF, and that PDF has no text

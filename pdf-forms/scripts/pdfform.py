@@ -42,6 +42,7 @@ import csv
 import difflib
 import json
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -184,7 +185,7 @@ def on_states(field_ref) -> list[str]:
             if isinstance(normal, StreamObject):
                 continue
             if isinstance(normal, DictionaryObject):
-                states |= {str(k) for k in normal.keys()}
+                states |= {str(k) for k in normal}
         except Exception:  # noqa: BLE001 - a malformed widget must not abort the walk
             continue
     states.discard("/Off")
@@ -273,7 +274,7 @@ def _kind(ft: str | None, flags: int) -> str:
     return str(ft or "unknown")
 
 
-def walk_fields(reader: PdfReader) -> list[dict]:
+def walk_fields(reader: PdfReader, source: str | Path | None = None) -> list[dict]:
     """Walk /AcroForm /Fields and return one record per *terminal* field.
 
     Names are fully qualified (parent./T joined by '.') because that is the key
@@ -285,6 +286,9 @@ def walk_fields(reader: PdfReader) -> list[dict]:
         return []
     pages = _widget_page_map(reader)
     live = live_widgets(reader)
+    # Only pay for the text scan when a caller wants labels (`fields`, `auto`,
+    # `complete`); `verify` and `flatten` never need them.
+    words = page_words(source) if source else {}
     found: list[dict] = []
 
     def recurse(ref, prefix: str, ft: str | None, flags: int) -> None:
@@ -325,8 +329,35 @@ def walk_fields(reader: PdfReader) -> list[dict]:
             if live_value is not None:
                 effective = live_value
 
+        # /TU is the tooltip — in practice the form author's own human-readable
+        # label ("Enter your last name"). It is the bridge between what a person
+        # calls a field and the machine name, and it costs nothing to read.
+        # /TM is the export/mapping name, a decent second choice.
+        label = obj.get("/TU") or obj.get("/TM")
+        if label is None and on_pages:
+            first_widget = on_pages[0][1]
+            label = first_widget.get("/TU") or first_widget.get("/TM")
+
+        # No tooltip? Read the label off the page. Most forms — the IRS W-9
+        # included — carry no /TU at all, so without this the human-label
+        # matching only works on the minority of forms that need it least.
+        label_source = "tooltip" if label is not None else None
+        if label is None and words and on_pages:
+            page_no, widget = on_pages[0]
+            rect = widget.get("/Rect")
+            if rect is not None and page_no in words:
+                try:
+                    guess = infer_label([float(v) for v in rect], words[page_no],
+                                        is_button=(str(ft) == "/Btn"))
+                    if guess:
+                        label, label_source = guess, "inferred"
+                except Exception:  # noqa: BLE001 - a bad /Rect must not stop the walk
+                    pass
+
         record = {
             "name": name,
+            "label": str(label) if label is not None else None,
+            "label_source": label_source,
             "type": _kind(str(ft) if ft else None, flags),
             "ft": str(ft) if ft else None,
             "value": str(effective) if effective is not None else None,
@@ -382,6 +413,141 @@ def page_text(path: str | Path, first: int | None = None, last: int | None = Non
         return "\n".join((p.extract_text() or "") for p in reader.pages[: last or 50])
     except Exception:  # noqa: BLE001
         return ""
+
+
+_PAGE_RE = re.compile(r'<page width="([\d.]+)" height="([\d.]+)"')
+_WORD_RE = re.compile(
+    r'<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">(.*?)</word>'
+)
+
+
+def page_words(path: str | Path) -> dict[int, dict]:
+    """Every word on every page with its box, via poppler's `pdftotext -bbox`.
+
+    Used to work out what a field is *called* when the form gives no /TU
+    tooltip — which is most forms, including the IRS W-9. One subprocess for the
+    whole document, and no new dependency: pdftotext is already required.
+
+    Coordinates are top-left origin (y grows downward), unlike PDF space.
+    """
+    if not have("pdftotext"):
+        return {}
+    try:
+        xml = subprocess.run(["pdftotext", "-bbox", str(path), "-"],
+                             capture_output=True, text=True, timeout=180).stdout
+    except Exception:  # noqa: BLE001
+        return {}
+
+    pages: dict[int, dict] = {}
+    chunks = xml.split("<page ")
+    for i, chunk in enumerate(chunks[1:], start=1):
+        head = _PAGE_RE.match("<page " + chunk[:120].split(">")[0] + ">")
+        size = (float(head.group(1)), float(head.group(2))) if head else (612.0, 792.0)
+        words = []
+        for m in _WORD_RE.finditer(chunk):
+            x0, y0, x1, y1, text = m.groups()
+            text = (text.replace("&amp;", "&").replace("&lt;", "<")
+                        .replace("&gt;", ">").replace("&quot;", '"')
+                        .replace("&apos;", "'").replace("&#39;", "'").strip())
+            if text:
+                words.append({"x0": float(x0), "top": float(y0),
+                              "x1": float(x1), "bottom": float(y1), "text": text})
+        pages[i] = {"size": size, "words": words}
+    return pages
+
+
+# A label is separated from unrelated text by visible whitespace. Collect words
+# outward from the field and stop at the first gap wider than this — without it,
+# a fixed word count runs straight off the end of a label and into the tail of
+# whatever sentence happens to sit nearby.
+LABEL_GAP_PT = 11.0
+LABEL_REACH_PT = 220.0   # nothing further away than this is the field's label
+LABEL_MAX_WORDS = 8
+
+
+def _collect(words: list[dict], edge: float, direction: str) -> str:
+    """Walk outward from a field edge, stopping at the first real gap."""
+    if direction == "left":
+        words.sort(key=lambda w: w["x1"], reverse=True)
+        picked, cursor = [], edge
+        for w in words:
+            if cursor - w["x1"] > LABEL_GAP_PT or len(picked) >= LABEL_MAX_WORDS:
+                break
+            picked.append(w)
+            cursor = w["x0"]
+        picked.reverse()
+    else:
+        words.sort(key=lambda w: w["x0"])
+        picked, cursor = [], edge
+        for w in words:
+            if w["x0"] - cursor > LABEL_GAP_PT or len(picked) >= LABEL_MAX_WORDS:
+                break
+            picked.append(w)
+            cursor = w["x1"]
+    return " ".join(w["text"] for w in picked).strip(" :·.,()")
+
+
+def infer_label(rect: list[float], page: dict, is_button: bool = False) -> str | None:
+    """Guess a field's label from the text around it.
+
+    Direction depends on the field type, because the conventions differ and
+    getting it backwards produces confident nonsense:
+
+      * a checkbox or radio is labelled to its **right** ("[ ] Individual"),
+      * a text field is labelled to its **left** or **above** ("Name: ____").
+
+    Reading a checkbox leftward walks across its neighbouring options and
+    returns the previous choice's text — a label that looks plausible and names
+    the wrong thing.
+    """
+    words = page.get("words") or []
+    if not words:
+        return None
+    height = page["size"][1]
+    x0, x1 = min(rect[0], rect[2]), max(rect[0], rect[2])
+    top, bottom = height - max(rect[1], rect[3]), height - min(rect[1], rect[3])
+    mid = (top + bottom) / 2
+    # Capped deliberately. A generous tolerance on a tall input box reaches up
+    # into the instruction paragraph above it and returns that sentence's tail
+    # as the label — confident, plausible, and wrong.
+    row_tol = min(max(4.0, (bottom - top) * 0.4), 8.0)
+
+    def same_row(w: dict) -> bool:
+        return abs((w["top"] + w["bottom"]) / 2 - mid) <= row_tol
+
+    right = [w for w in words if same_row(w) and w["x0"] >= x1 - 2
+             and w["x0"] - x1 <= LABEL_REACH_PT]
+    left = [w for w in words if same_row(w) and w["x1"] <= x0 + 2
+            and x0 - w["x1"] <= LABEL_REACH_PT]
+
+    beside = None
+    order = ["right", "left"] if is_button else ["left", "right"]
+    for direction in order:
+        pool = right if direction == "right" else left
+        if pool:
+            text = _collect(list(pool), x1 if direction == "right" else x0, direction)
+            if text:
+                beside = text
+                break
+
+    # The other common layout: a heading directly above the box.
+    above_text = None
+    above = [w for w in words
+             if w["bottom"] <= top + 2 and top - w["bottom"] <= LABEL_REACH_PT
+             and not (w["x1"] < x0 - 4 or w["x0"] > x1 + 4)]
+    if above:
+        nearest = max(w["bottom"] for w in above)
+        row = sorted((w for w in above if nearest - w["bottom"] <= 4),
+                     key=lambda w: w["x0"])
+        above_text = " ".join(w["text"] for w in row[:LABEL_MAX_WORDS]).strip(" :·.,()")
+
+    # A fragment starting mid-sentence is the tail of a wrapped instruction
+    # paragraph, not a label ("entity's name on line 2"). Real labels start with
+    # a capital or the field's number. When the neighbour looks like prose and
+    # there is a heading above, trust the heading.
+    if beside and above_text and beside[:1].islower():
+        return above_text
+    return beside or above_text or None
 
 
 def font_count(path: str | Path) -> int | None:
@@ -472,7 +638,7 @@ def cmd_triage(args) -> int:
 
 def cmd_fields(args) -> int:
     reader = load(args.file, args.password)
-    fields = walk_fields(reader)
+    fields = walk_fields(reader, source=args.file)
     if not fields:
         raise FormError(
             "no AcroForm fields. Run `triage` — this is probably a flat or scanned form."
@@ -559,8 +725,8 @@ def _validate(data: dict, fields: list[dict]) -> dict:
             )
             continue
 
-        if field["type"] in ("dropdown", "listbox") and field.get("options"):
-            if str(value) not in field["options"]:
+        if (field["type"] in ("dropdown", "listbox") and field.get("options")
+                and str(value) not in field["options"]):
                 close = difflib.get_close_matches(str(value), field["options"], n=3, cutoff=0.5)
                 hint = f" Did you mean: {', '.join(close)}?" if close else ""
                 problems.append(
@@ -574,6 +740,206 @@ def _validate(data: dict, fields: list[dict]) -> dict:
     if problems:
         raise FormError("cannot fill:\n  - " + "\n  - ".join(problems))
     return resolved
+
+
+# --------------------------------------------------------------------------
+# profile — the values you retype on every form
+# --------------------------------------------------------------------------
+
+PROFILE_PATH = Path.home() / ".config" / "pdf-forms" / "profile.json"
+
+# Keys the profile refuses to hold. The convenience of never retyping an SSN is
+# not worth a plaintext copy of it sitting in a file that will end up in a
+# backup, a sync folder, or a support bundle. These stay per-form and manual;
+# everything else is the boring stuff that is genuinely tedious.
+#
+# Deliberately NOT one big regex. The previous version was
+# `\b(...|driver.?s?.?lic|...)\b`, which fails on "drivers license" because the
+# trailing \b lands between "lic" and "e" — two word characters, so no boundary,
+# so no match. It read as thorough and rejected nothing. Token matching on a
+# normalised key is duller and actually works.
+SENSITIVE_TOKENS = {
+    "ssn", "ssn#", "dob", "tin", "itin", "ein", "cvv", "cvc", "pin", "passport",
+    "routing", "iban", "swift", "maiden", "password", "passcode", "license",
+    "licence", "dl", "sin", "nino",
+}
+SENSITIVE_PHRASES = (
+    "social security", "date of birth", "birth date", "birthdate", "tax id",
+    "taxpayer id", "account number", "account no", "acct number", "card number",
+    "credit card", "debit card", "bank account", "security question",
+    "mother maiden", "mothers maiden", "drivers license", "driver license",
+    "license number", "id number", "identification number",
+)
+
+
+def is_sensitive(key: str) -> bool:
+    """True if a profile key looks like an identity or financial secret."""
+    norm = _norm(key)
+    if any(phrase in norm for phrase in SENSITIVE_PHRASES):
+        return True
+    return bool(SENSITIVE_TOKENS & set(norm.split()))
+
+
+def load_profile() -> dict[str, str]:
+    if not PROFILE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(PROFILE_PATH.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:  # noqa: BLE001
+        note(f"profile at {PROFILE_PATH} is unreadable ({exc}); ignoring it")
+        return {}
+
+
+def save_profile(entries: dict[str, str]) -> None:
+    PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PROFILE_PATH.write_text(json.dumps(entries, indent=2, ensure_ascii=False) + "\n")
+    PROFILE_PATH.chmod(0o600)  # owner-only; it still holds address and phone
+
+
+def cmd_profile(args) -> int:
+    """Store the values you retype on every form. Refuses sensitive ones."""
+    entries = load_profile()
+
+    if args.action == "show":
+        out_json({"path": str(PROFILE_PATH), "exists": PROFILE_PATH.exists(),
+                  "entries": entries})
+        return 0
+
+    if args.action == "clear":
+        if PROFILE_PATH.exists():
+            PROFILE_PATH.unlink()
+        out_json({"path": str(PROFILE_PATH), "cleared": True})
+        return 0
+
+    # set
+    if not args.pairs:
+        raise FormError('nothing to set. Usage: profile set "first name=Jordan" '
+                        '"phone=914-555-0100"')
+    refused, added = [], []
+    for pair in args.pairs:
+        if "=" not in pair:
+            raise FormError(f"expected key=value, got {pair!r}")
+        key, value = pair.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if is_sensitive(key):
+            refused.append(key)
+            continue
+        if not value:
+            entries.pop(key, None)
+            continue
+        entries[key] = value
+        added.append(key)
+    if added or refused:
+        save_profile(entries)
+
+    result = {"path": str(PROFILE_PATH), "stored": added, "total": len(entries)}
+    if refused:
+        result["refused"] = refused
+        result["why"] = (
+            "These look like identity or financial secrets, and the profile is a "
+            "plaintext file — it will end up in a backup or sync folder eventually. "
+            "Pass them per-form in --data instead; they are the values you should "
+            "be typing deliberately anyway."
+        )
+    out_json(result)
+    return 0
+
+
+def _norm(s: str) -> str:
+    """Loose comparison key: case, punctuation and spacing all ignored."""
+    return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
+
+
+def resolve_keys(data: dict, fields: list[dict]) -> tuple[dict, list[str], list[str]]:
+    """Map human-written keys onto real field names.
+
+    Nobody knows a field is called topmostSubform[0].Page1[0].f1_01[0]. They
+    know it is "last name". Match, in descending order of confidence:
+
+      1. exact field name          (already correct — never second-guess it)
+      2. exact label (/TU) match   (the form author's own wording)
+      3. normalised equality on label or name
+      4. containment, then fuzzy
+
+    A tie between two fields is reported, never guessed: silently picking one of
+    two plausible fields is how the right value lands in the wrong box.
+    """
+    by_name = {f["name"]: f for f in fields}
+    resolved: dict[str, Any] = {}
+    problems: list[str] = []
+    notes: list[str] = []
+
+    for key, value in data.items():
+        if key in by_name:
+            resolved[key] = value
+            continue
+
+        nkey = _norm(key)
+        tiers: list[list[dict]] = [
+            [f for f in fields if f.get("label") and _norm(f["label"]) == nkey],
+            [f for f in fields if _norm(f["name"]) == nkey],
+            [f for f in fields if f.get("label") and nkey in _norm(f["label"])],
+            [f for f in fields if nkey in _norm(f["name"])],
+        ]
+        match = None
+        for tier in tiers:
+            usable = [f for f in tier if not f["readonly"]]
+            if len(usable) == 1:
+                match = usable[0]
+                break
+            if len(usable) > 1:
+                problems.append(
+                    f"{key!r} is ambiguous — matches {len(usable)} fields: "
+                    + ", ".join(f"{f['name']!r}" + (f" ({f['label']})" if f.get("label") else "")
+                                for f in usable[:5])
+                    + ". Use the exact field name."
+                )
+                match = "AMBIGUOUS"  # type: ignore[assignment]
+                break
+        # Inferred labels are approximate — "Name of entity/individual" against a
+        # label read off the page as "entity's name on line 2" shares meaning but
+        # no substring. Score by how much of the query the candidate accounts
+        # for, and accept only a clear single winner.
+        if match is None:
+            qtokens = {t for t in nkey.split() if len(t) > 2}
+            if qtokens:
+                scored = []
+                for f in fields:
+                    if f["readonly"]:
+                        continue
+                    hay = set(_norm(f.get("label") or "").split()) | set(_norm(f["name"]).split())
+                    overlap = len(qtokens & hay) / len(qtokens)
+                    if overlap >= 0.6:
+                        scored.append((overlap, f))
+                if scored:
+                    best = max(s for s, _ in scored)
+                    winners = [f for s, f in scored if s == best]
+                    if len(winners) == 1:
+                        match = winners[0]
+                    else:
+                        problems.append(
+                            f"{key!r} matches {len(winners)} fields equally well: "
+                            + ", ".join(repr(f["name"]) for f in winners[:5])
+                            + ". Use the exact field name."
+                        )
+                        match = "AMBIGUOUS"  # type: ignore[assignment]
+
+        if match == "AMBIGUOUS":
+            continue
+        if match is None:
+            pool = {f["name"]: f for f in fields}
+            pool.update({f["label"]: f for f in fields if f.get("label")})
+            close = difflib.get_close_matches(key, list(pool), n=3, cutoff=0.55)
+            hint = f" Closest: {', '.join(repr(c) for c in close)}." if close else ""
+            problems.append(f"no field matches {key!r}.{hint}")
+            continue
+
+        resolved[match["name"]] = value
+        notes.append(f"{key!r} -> {match['name']!r}"
+                     + (f" ({match['label']})" if match.get("label") else ""))
+
+    return resolved, problems, notes
 
 
 def _existing_values(fields: list[dict]) -> dict[str, Any]:
@@ -833,15 +1199,20 @@ def cmd_flatten(args) -> int:
     return 0
 
 
-def cmd_verify(args) -> int:
-    """Prove the output is what it claims. Exits non-zero on any failure.
+def _run_checks(out_path: Path, original: str | Path | None = None,
+                expect: dict | None = None, require_flat: bool = False,
+                page: int | None = None, password: str | None = None) -> dict:
+    """Prove the output is what it claims.
 
-    Checks the three failure modes that are otherwise completely silent:
+    Checks the failure modes that are otherwise completely silent:
       1. values written but no appearance stream  -> renders blank when printed
       2. "flattened" but the form layer survives  -> data still extractable
       3. flattening destroyed the values          -> blank output, no error
+
+    Shared by `verify` and `complete` so the one-shot path can never end up
+    with weaker guarantees than the manual one.
     """
-    out_path = Path(args.output).expanduser()
+    out_path = Path(out_path).expanduser()
     reader = load(out_path)
     fields = walk_fields(reader)
     acro = acroform_of(reader)
@@ -855,8 +1226,12 @@ def cmd_verify(args) -> int:
             ok = False
 
     widget_total = 0
-    for page in reader.pages:
-        for annot in _annots(page):
+    # NB: not `for page in ...` — `page` is this function's parameter (the page
+    # number to render-compare). Shadowing it here leaves a PageObject where an
+    # int is expected, which breaks the render check only when a caller passes
+    # --page explicitly: correct by default, wrong when specified.
+    for pg in reader.pages:
+        for annot in _annots(pg):
             try:
                 if annot.get_object().get("/Subtype") == "/Widget":
                     widget_total += 1
@@ -868,7 +1243,7 @@ def cmd_verify(args) -> int:
               if flattened else
               f"/AcroForm={'present' if acro else 'absent'}, {widget_total} widget(s) remain "
               "— field values are still live objects and remain extractable")
-    if args.flat:
+    if require_flat:
         # Asked for a flattened file: anything short of it is a failure. A form
         # left half-flattened still carries every value as machine-readable
         # metadata, which is the whole risk when sending it to a third party.
@@ -877,8 +1252,8 @@ def cmd_verify(args) -> int:
         checks.append({"check": "flattened", "passed": True,
                        "detail": f"informational: {detail}"})
 
-    if args.expect:
-        expected = json.loads(Path(args.expect).expanduser().read_text())
+    if expect:
+        expected = expect
         if flattened:
             # Values no longer exist as objects — they must be visible as text.
             text = page_text(out_path)
@@ -934,14 +1309,14 @@ def cmd_verify(args) -> int:
                   "all filled fields have appearance streams" if not no_ap
                   else f"no /AP (will print blank): {no_ap[:8]}")
 
-    if args.original:
+    if original:
         # The check that matters most on a flatten: did anything that was
         # already in the form get destroyed? Verifying only the values you just
         # wrote passes with flying colours while every pre-existing answer is
         # silently dropped — which is what a flatten does if it is handed only
         # the new values. Compare against the source, not against the request.
         try:
-            before = _existing_values(walk_fields(load(args.original, args.password)))
+            before = _existing_values(walk_fields(load(original, password)))
         except FormError:
             before = {}
         if before:
@@ -951,7 +1326,7 @@ def cmd_verify(args) -> int:
                 # happens to appear elsewhere — "Female" occurs on half the
                 # pages of a long packet — so it would clear a real data loss.
                 origin = {f["name"]: f["pages"]
-                          for f in walk_fields(load(args.original, args.password))}
+                          for f in walk_fields(load(original, password))}
                 page_cache: dict[int, str] = {}
                 lost = []
                 for key, value in before.items():
@@ -981,22 +1356,20 @@ def cmd_verify(args) -> int:
             else:
                 after = {f["name"]: f["value"] for f in fields}
                 lost = [k for k, v in before.items()
-                        if after.get(k) in (None, "") and k not in (
-                            json.loads(Path(args.expect).expanduser().read_text())
-                            if args.expect else {})]
+                        if after.get(k) in (None, "") and k not in (expect or {})]
                 check("nothing_lost", not lost,
                       "all pre-existing values retained" if not lost
                       else f"{len(lost)} pre-existing value(s) lost, e.g. {lost[:6]}")
 
-    if args.original and have("pdftoppm"):
+    if original and have("pdftoppm"):
         # Compare a page that SHOULD have changed. Defaulting to page 1 makes
         # this check meaningless on a 49-page packet whose fields start on
         # page 11 — it would report "nothing was drawn" for a perfect fill.
-        target = args.page
+        target = page
         if target is None:
             candidates: list[int] = []
-            if args.expect:
-                names = set(json.loads(Path(args.expect).expanduser().read_text()))
+            if expect:
+                names = set(expect)
                 # A flattened output has no fields left to locate, so field
                 # positions must come from the ORIGINAL. Reading them from the
                 # output silently falls back to page 1 — a page with no fields,
@@ -1004,7 +1377,7 @@ def cmd_verify(args) -> int:
                 locator = fields
                 if flattened:
                     try:
-                        locator = walk_fields(load(args.original, args.password))
+                        locator = walk_fields(load(original, password))
                     except FormError:
                         locator = []
                 for f in locator:
@@ -1018,7 +1391,7 @@ def cmd_verify(args) -> int:
         scratch.mkdir(exist_ok=True)
         for old in scratch.glob("*.png"):
             old.unlink()  # stale renders would otherwise be compared
-        a = render(args.original, scratch / "orig", first=target, last=target)
+        a = render(original, scratch / "orig", first=target, last=target)
         b = render(out_path, scratch / "out", first=target, last=target)
         if a and b:
             same = a[0].read_bytes() == b[0].read_bytes()
@@ -1030,8 +1403,18 @@ def cmd_verify(args) -> int:
             checks.append({"check": "render", "passed": True,
                            "detail": f"page {target}: compare {a[0]} vs {b[0]}"})
 
-    out_json({"output": str(out_path), "ok": ok, "checks": checks})
-    return 0 if ok else 1
+    return {"output": str(out_path), "ok": ok, "checks": checks}
+
+
+def cmd_verify(args) -> int:
+    expect = None
+    if args.expect:
+        expect = json.loads(Path(args.expect).expanduser().read_text())
+    result = _run_checks(Path(args.output).expanduser(), original=args.original,
+                         expect=expect, require_flat=args.flat, page=args.page,
+                         password=args.password)
+    out_json(result)
+    return 0 if result["ok"] else 1
 
 
 def _find_ref(reader: PdfReader, name: str):
@@ -1113,6 +1496,168 @@ def cmd_ocr(args) -> int:
     raise FormError(f"OCR failed with every engine. Last error:\n{last_err}")
 
 
+def cmd_auto(args) -> int:
+    """One call that gets any PDF to 'ready to fill'.
+
+    Triage, and if the file turns out to be a scan, OCR it and triage again —
+    the routing that would otherwise be three manual round trips. Writes a
+    template JSON pre-keyed by human label, pre-filled from the profile where it
+    can, so the only thing left to do is type the values that are actually
+    specific to this form.
+    """
+    src = Path(args.file).expanduser()
+    steps: list[str] = []
+
+    reader = load(src, args.password)
+    acro = acroform_of(reader)
+    fields = walk_fields(reader) if acro else []
+    working = src
+
+    # A scan cannot be filled and cannot be inspected. Fix that before deciding
+    # anything else, rather than reporting "scanned" and making someone else
+    # run the obvious next command.
+    if not fields:
+        chars = len(page_text(src).replace("\f", "").strip())
+        pages = max(len(reader.pages), 1)
+        if (font_count(src) == 0) or (chars / pages) < SCANNED_CHARS_PER_PAGE:
+            if have("ocrmypdf") and not args.no_ocr:
+                ocred = src.with_name(src.stem + ".ocr.pdf")
+                steps.append(f"detected a scan ({chars / pages:.0f} chars/page) — running OCR")
+                engine = ["--ocr-engine", "appleocr"] if sys.platform == "darwin" else []
+                res = subprocess.run(
+                    ["ocrmypdf", *engine, "--skip-text", "--rotate-pages", "--deskew",
+                     str(src), str(ocred)],
+                    capture_output=True, text=True, timeout=3600)
+                if res.returncode != 0 and engine:
+                    res = subprocess.run(
+                        ["ocrmypdf", "--skip-text", "--rotate-pages", "--deskew",
+                         str(src), str(ocred)],
+                        capture_output=True, text=True, timeout=3600)
+                if res.returncode == 0:
+                    working = ocred
+                    steps.append(f"OCR complete -> {ocred.name}")
+                else:
+                    steps.append(f"OCR failed: {res.stderr.strip()[:200]}")
+            elif not have("ocrmypdf"):
+                steps.append("detected a scan, but ocrmypdf is not installed "
+                             "(brew install ocrmypdf) — see references/ocr-ladder.md")
+
+    reader = load(working, args.password)
+    acro = acroform_of(reader)
+    fields = walk_fields(reader, source=working) if acro else []
+    has_xfa = bool(acro and "/XFA" in acro)
+    lane = ("xfa" if has_xfa and not fields else
+            "xfa-hybrid" if has_xfa else
+            "acroform" if fields else
+            "scanned" if (font_count(working) == 0) else "flat")
+
+    result: dict[str, Any] = {
+        "file": str(working),
+        "original": str(src) if working != src else None,
+        "lane": lane,
+        "steps": steps,
+        "pages": len(reader.pages),
+        "fields": len(fields),
+    }
+
+    if fields:
+        profile = {} if args.no_profile else load_profile()
+        writable = [f for f in fields if not f["readonly"] and f["type"] != "pushbutton"]
+        template: dict[str, Any] = {}
+        prefilled: list[str] = []
+
+        if profile:
+            mapped, _, notes = resolve_keys(profile, fields)
+            for fname, value in mapped.items():
+                template[fname] = value
+                prefilled.append(fname)
+            if notes:
+                result["profile_matched"] = notes
+
+        for f in writable:
+            if f["name"] in template:
+                continue
+            if f["value"] not in (None, "", "/Off"):
+                continue  # already answered — leave it alone
+            template[f["name"]] = ""
+
+        tpl = Path(args.template or working.with_suffix(".fill.json"))
+        tpl.write_text(json.dumps(template, indent=2, ensure_ascii=False) + "\n")
+
+        result["template"] = str(tpl)
+        result["prefilled_from_profile"] = len(prefilled)
+        result["to_fill"] = len(template) - len(prefilled)
+        result["labels"] = [
+            {"name": f["name"], "label": f["label"], "type": f["type"],
+             **({"on_states": f["on_states"]} if f.get("on_states") else {})}
+            for f in writable
+        ][: args.limit]
+        result["next"] = (f'edit "{tpl}", then: '
+                          f'pdfform.py complete "{working}" --data "{tpl}" -o filled.pdf')
+    elif lane == "flat":
+        result["next"] = f'overlay.py geometry "{working}" --page 1'
+    elif lane == "xfa":
+        result["next"] = "STOP — dynamic XFA, nothing to fill. See references/gotchas.md#xfa"
+    else:
+        result["next"] = f'pdfform.py ocr "{working}" -o ocr.pdf'
+
+    out_json(result)
+    return 0
+
+
+def cmd_complete(args) -> int:
+    """Resolve, fill, flatten and verify in one call, with one verdict.
+
+    Exits non-zero if verification fails, so a caller never has to interpret a
+    chain of intermediate successes to find out the document is wrong.
+    """
+    src = Path(args.file).expanduser()
+    dest = Path(args.output).expanduser()
+    reader = load(src, args.password)
+    fields = walk_fields(reader, source=src)
+    if not fields:
+        raise FormError("no fillable fields — run `auto` first; this may be a "
+                        "scanned or flat form.")
+
+    raw = json.loads(Path(args.data).expanduser().read_text()) if args.data else {}
+    if not isinstance(raw, dict):
+        raise FormError("--data must be a JSON object")
+    raw = {k: v for k, v in raw.items() if v not in ("", None)}
+
+    # Explicit values are held to a strict standard: a key you typed that
+    # matches no field is a mistake worth stopping for. Profile values are
+    # best-effort — the profile is a convenience layer, and a form that simply
+    # has no "employer" field must not fail because your profile mentions one.
+    profile = {} if args.no_profile else load_profile()
+    p_mapped, _p_problems, p_notes = resolve_keys(profile, fields)
+    e_mapped, problems, e_notes = resolve_keys(raw, fields)
+    if problems:
+        raise FormError("could not resolve field(s):\n  - " + "\n  - ".join(problems))
+
+    skipped = sorted(set(profile) - {k for k in profile if any(
+        n.startswith(repr(k)) for n in p_notes)})
+    data = _validate({**p_mapped, **e_mapped}, fields)
+    if not data:
+        raise FormError("nothing to fill: --data was empty and no profile value "
+                        "matched a field on this form.")
+
+    flatten = not args.no_flatten
+    _do_fill(src, data, dest, flatten=flatten)
+
+    verdict = _run_checks(dest, original=src, expect=data, require_flat=flatten,
+                          page=None, password=args.password)
+    out_json({
+        "output": str(dest),
+        "filled": len(data),
+        "flattened": flatten,
+        "resolved": e_notes + p_notes,
+        "profile_keys_not_on_this_form": skipped,
+        "ok": verdict["ok"],
+        "checks": verdict["checks"],
+    })
+    return 0 if verdict["ok"] else 1
+
+
 def cmd_batch(args) -> int:
     """One template, many records — fill + flatten + verify each, report per row."""
     template = Path(args.template).expanduser()
@@ -1159,6 +1704,28 @@ def main() -> int:
     )
     parser.add_argument("--password", help="password for an encrypted PDF")
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("auto", help="START HERE — route the file, OCR if needed, "
+                                    "and write a fill template")
+    p.add_argument("file")
+    p.add_argument("--template", help="where to write the fill template JSON")
+    p.add_argument("--no-ocr", action="store_true", help="do not OCR a scan automatically")
+    p.add_argument("--no-profile", action="store_true", help="ignore the saved profile")
+    p.add_argument("--limit", type=int, default=60, help="max fields to list inline")
+    p.set_defaults(func=cmd_auto)
+
+    p = sub.add_parser("complete", help="resolve + fill + flatten + verify in one call")
+    p.add_argument("file")
+    p.add_argument("--data", help="JSON of {field name or human label: value}")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--no-flatten", action="store_true")
+    p.add_argument("--no-profile", action="store_true")
+    p.set_defaults(func=cmd_complete)
+
+    p = sub.add_parser("profile", help="values you reuse across forms")
+    p.add_argument("action", choices=["show", "set", "clear"])
+    p.add_argument("pairs", nargs="*", help='key=value, e.g. "first name=Jordan"')
+    p.set_defaults(func=cmd_profile)
 
     p = sub.add_parser("triage", help="classify a PDF and name the next command")
     p.add_argument("file")

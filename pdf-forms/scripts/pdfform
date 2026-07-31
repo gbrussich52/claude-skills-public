@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Thin launcher so the tool is `pdfform ...` instead of a uv incantation.
+# Symlink it onto your PATH:
+#   ln -sf ~/.claude/skills/pdf-forms/scripts/pdfform ~/.local/bin/pdfform
+#
+# Resolves its own real location first, so the symlink can live anywhere.
+set -euo pipefail
+
+target="${BASH_SOURCE[0]}"
+while [ -L "$target" ]; do
+  dir="$(cd -P "$(dirname "$target")" && pwd)"
+  target="$(readlink "$target")"
+  [[ "$target" != /* ]] && target="$dir/$target"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$target")" && pwd)"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "pdfform: uv is required (https://docs.astral.sh/uv/) — brew install uv" >&2
+  exit 127
+fi
+
+# `overlay` routes to the second script; everything else is the main CLI.
+if [ "${1:-}" = "overlay" ]; then
+  shift
+  exec uv run --script "$SCRIPT_DIR/overlay.py" "$@"
+fi
+exec uv run --script "$SCRIPT_DIR/pdfform.py" "$@"

@@ -29,31 +29,51 @@ Drop the `pdf-forms` directory into `~/.claude/skills/`. That's it — the scrip
 declare their own dependencies inline ([PEP 723][pep723]) and run under
 `uv run --script` with nothing installed globally. No venv, no `pip install`.
 
-Requires [uv][uv] and, for rendering and text extraction, poppler
-(`brew install poppler`).
+For the short `pdfform` command, symlink the launcher:
+
+```bash
+ln -sf ~/.claude/skills/pdf-forms/scripts/pdfform ~/.local/bin/pdfform
+```
+
+Requires [uv][uv] and poppler (`brew install poppler`) for rendering and text
+extraction. Optional: `brew install ocrmypdf` for scanned forms — it also brings
+qpdf, which enables the alternate flatten engine.
 
 [pep723]: https://peps.python.org/pep-0723/
 [uv]: https://docs.astral.sh/uv/
 
 ## Use
 
+Two commands, any form:
+
 ```bash
-# 1. Classify the file — it prints the exact next command
-uv run --script scripts/pdfform.py triage form.pdf
+# Routes the file, OCRs it if it's a scan, and writes a fill template
+# with human-readable labels for every field.
+pdfform auto form.pdf
 
-# 2. Discover fields, including each checkbox's real on-states
-uv run --script scripts/pdfform.py fields form.pdf --json --mask
-
-# 3. Fill and flatten
-uv run --script scripts/pdfform.py fill form.pdf --data values.json -o out.pdf --flatten
-
-# 4. Prove it worked
-uv run --script scripts/pdfform.py verify out.pdf --expect values.json \
-      --original form.pdf --flat
+# Resolve -> validate -> fill -> flatten -> verify. Non-zero exit if any
+# check fails.
+pdfform complete form.pdf --data form.fill.json -o out.pdf
 ```
 
-Also: `ocr` for scanned pages, `batch` for one template × many records, and
-`overlay.py` for printed forms that have no fields at all.
+Key your data by the real field name **or by what the field is called on the
+page** — `"Individual/sole proprietor": true` resolves to
+`topmostSubform[0].Page1[0].Boxes3a-b_ReadOrder[0].c1_1[0]` on an IRS W-9.
+Labels come from the form's tooltip where present and are otherwise read off the
+page by position. A label matching two fields is reported, never guessed.
+
+Values you retype on every form can live in a profile:
+
+```bash
+pdfform profile set "first name=Jordan" "city=Rye" "employer=Example Corp"
+```
+
+It refuses SSN, DOB, licence, passport, account and card-style keys — it's a
+plaintext file, and those belong in `--data`, typed deliberately per form.
+
+The individual steps are still there when something goes wrong: `triage`,
+`fields`, `fill`, `flatten`, `verify`, `ocr`, `batch`, and `pdfform overlay`
+for printed forms with no fields at all.
 
 ## What `verify` checks
 
