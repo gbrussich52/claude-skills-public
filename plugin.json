@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "claude-skills-public",
+  "version": "1.0.0",
+  "description": "Shareable Agent Skills: dynamic-workflows, alpha-hunter, agent-skill-forge, and pdf-forms.",
+  "author": {
+    "name": "Giani Brussich",
+    "url": "https://github.com/gbrussich52"
+  },
+  "homepage": "https://github.com/gbrussich52/claude-skills-public",
+  "repository": "https://github.com/gbrussich52/claude-skills-public",
+  "license": "MIT",
+  "keywords": [
+    "skills",
+    "workflows",
+    "pdf",
+    "trading",
+    "agent-skills"
+  ]
+}

@@ -13,6 +13,8 @@ cp -r claude-skills-public/dynamic-workflows ~/.claude/skills/
 
 Claude Code picks up new skills at the start of your next session. Trigger them naturally ("use a dynamic workflow for this") or explicitly with `/skill-name`.
 
+Cursor Agent Plugin: this repo is also an Agent Plugins 1.0.0 package (`plugin.json`). Install the clone under `~/.cursor/plugins/local/claude-skills-public/`.
+
 ## Skills
 
 | Skill | What it does | Requires |
